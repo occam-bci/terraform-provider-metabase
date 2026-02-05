@@ -5,7 +5,7 @@ subcategory: ""
 description: |-
   The graph of permissions between permissions groups and collections.
   Metabase exposes a single resource to define all permissions related to collections. This means a single collection graph resource should be defined in the entire Terraform configuration.
-  The collection graph cannot be created or deleted. Trying to create it will result in an error. It should be imported instead. Trying to delete the resource will succeed with no impact on Metabase (it is a no-op).
+  The collection graph cannot be deleted. Trying to delete the resource will succeed with no impact on Metabase (it is a no-op). For initial setup, it should be imported using `terraform import`.
   Permissions for the Administrators group cannot be changed. To avoid issues during the update, all permissions for the Administrators group are ignored by default. This behavior can be changed using the ignored groups attribute.
 ---
 
@@ -15,11 +15,42 @@ The graph of permissions between permissions groups and collections.
 
 Metabase exposes a single resource to define all permissions related to collections. This means a single collection graph resource should be defined in the entire Terraform configuration.
 
-The collection graph cannot be created or deleted. Trying to create it will result in an error. It should be imported instead. Trying to delete the resource will succeed with no impact on Metabase (it is a no-op).
+The collection graph cannot be deleted. Trying to delete the resource will succeed with no impact on Metabase (it is a no-op). For initial setup, it should be imported using `terraform import`.
 
 Permissions for the Administrators group cannot be changed. To avoid issues during the update, all permissions for the Administrators group are ignored by default. This behavior can be changed using the ignored groups attribute.
 
+## Automatic Child Collection Permissions
+
+When `apply_child_collections_permissions` is enabled (default: `true`), the provider automatically applies hierarchical permissions to all child collections under **Public (ID 5)** and **Draft (ID 4)** collections.
+
+### How it works
+
+The provider matches **group names** with **collection names** to determine ownership:
+
+- If a group name matches a collection name (e.g., group "Software" and collection "Software"), that group gets **write** permission on the collection and all its children.
+- All other groups get **read** permission on those collections.
+
+This ensures that:
+1. Each team has write access to their own collections hierarchy
+2. All teams have read access to other teams' collections
+3. Permissions are automatically propagated to nested sub-collections
+
+### Example
+
+If you have:
+- Group "Software" (ID 5)
+- Collection "Software" under Public (ID 16, location `/5/`)
+- Sub-collection "Backend" under "Software" (ID 60, location `/5/16/`)
+
+The provider will automatically:
+- Give group "Software" **write** permission on collections 16 and 60
+- Give all other groups **read** permission on collections 16 and 60
+
+These recursive permissions are applied to Metabase but are **not tracked in Terraform state**, so they won't appear in `terraform plan` output.
+
 ## Example Usage
+
+### Basic Usage
 
 ```terraform
 resource "metabase_collection" "business_reports" {
@@ -52,6 +83,72 @@ resource "metabase_collection_graph" "graph" {
 }
 ```
 
+### With Automatic Child Collection Permissions
+
+This example shows how to set up team-based collections where each team owns their collection hierarchy:
+
+```terraform
+# Create groups for each team
+resource "metabase_permissions_group" "software" {
+  name = "Software"
+}
+
+resource "metabase_permissions_group" "data" {
+  name = "Data"
+}
+
+# Create collections under Public (parent_id = 5)
+# The collection name matches the group name for automatic permission inheritance
+resource "metabase_collection" "software_public" {
+  name      = "Software"
+  parent_id = 5  # Public collection
+}
+
+resource "metabase_collection" "data_public" {
+  name      = "Data"
+  parent_id = 5  # Public collection
+}
+
+# Define explicit permissions for the top-level collections
+# Child collections will automatically inherit permissions based on group name matching
+resource "metabase_collection_graph" "permissions" {
+  permissions = [
+    # Software group has write on Software collection
+    {
+      group      = metabase_permissions_group.software.id
+      collection = metabase_collection.software_public.id
+      permission = "write"
+    },
+    # Data group has read on Software collection
+    {
+      group      = metabase_permissions_group.data.id
+      collection = metabase_collection.software_public.id
+      permission = "read"
+    },
+    # Data group has write on Data collection
+    {
+      group      = metabase_permissions_group.data.id
+      collection = metabase_collection.data_public.id
+      permission = "write"
+    },
+    # Software group has read on Data collection
+    {
+      group      = metabase_permissions_group.software.id
+      collection = metabase_collection.data_public.id
+      permission = "read"
+    },
+  ]
+
+  # Enabled by default - child collections under /5/{collection}/* and /4/{collection}/*
+  # will automatically receive permissions based on group name matching
+  # apply_child_collections_permissions = true
+}
+```
+
+With this setup, any sub-collections created under "Software" (e.g., "Backend", "Frontend") will automatically get:
+- **write** permission for the "Software" group
+- **read** permission for the "Data" group (and all other groups)
+
 <!-- schema generated by tfplugindocs -->
 ## Schema
 
@@ -61,6 +158,7 @@ resource "metabase_collection_graph" "graph" {
 
 ### Optional
 
+- `apply_child_collections_permissions` (Boolean) When enabled (default: `true`), automatically applies hierarchical permissions to all child collections of Public (ID 5) and Draft (ID 4) collections. Groups with names matching collection names get `write` permission; all other groups get `read` permission. These recursive permissions are applied to Metabase but are not tracked in Terraform state.
 - `ignored_groups` (Set of Number) The list of group IDs that should be ignored when reading and updating permissions. By default, this contains the Administrators group (`[2]`).
 
 ### Read-Only
